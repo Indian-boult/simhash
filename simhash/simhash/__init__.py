@@ -6,12 +6,8 @@ import sys
 import hashlib
 import logging
 import numbers
-<<<<<<< Updated upstream
-import collections
-=======
 import collections.abc
 from collections.abc import Iterable
->>>>>>> Stashed changes
 from itertools import groupby
 import numpy as np
 
@@ -35,13 +31,10 @@ else:
         return int(b.encode('hex'), 16)
 
 def _hashfunc(x):
-<<<<<<< Updated upstream
-=======
     """Default hash function using MD5.
     
     Returns the digest bytes (not an integer).
     """
->>>>>>> Stashed changes
     return hashlib.md5(x).digest()
 
 
@@ -59,11 +52,7 @@ class Simhash(object):
         `reg` is meaningful only when `value` is basestring and describes
         what is considered to be a letter inside parsed string. Regexp
         object can also be specified (some attempt to handle any letters
-<<<<<<< Updated upstream
-        is to specify reg=re.compile(r'\w', re.UNICODE))
-=======
         is to specify reg=re.compile(r'\\w', re.UNICODE))
->>>>>>> Stashed changes
 
         `hashfunc` accepts a utf-8 encoded string and returns either bytes
         (preferred) or an unsigned integer, in at least `f // 8` bytes.
@@ -72,22 +61,14 @@ class Simhash(object):
             raise ValueError('f must be a multiple of 8')
 
         self.f = f
-<<<<<<< Updated upstream
-        self.f_bytes = f // 4
-=======
         self.f_bytes = f // 8  # Number of bytes needed for f bits
->>>>>>> Stashed changes
         self.reg = reg
         self.value = None
         
         # Setup hash function and detect return type
         self.hashfunc = hashfunc
-<<<<<<< Updated upstream
-        self.hashfunc_returns_int = isinstance(hashfunc(b"test"), numbers.Integral)
-=======
         test_hash = hashfunc(b"test")
         self.hashfunc_returns_int = isinstance(test_hash, numbers.Integral)
->>>>>>> Stashed changes
 
         if log is None:
             self.log = logging.getLogger("simhash")
@@ -99,11 +80,7 @@ class Simhash(object):
             self.value = value.value
         elif isinstance(value, basestring):
             self.build_by_text(unicode(value))
-<<<<<<< Updated upstream
-        elif isinstance(value, collections.Iterable):
-=======
         elif isinstance(value, Iterable):
->>>>>>> Stashed changes
             self.build_by_features(value)
         elif isinstance(value, numbers.Integral):
             self.value = value & ((1 << self.f) - 1)  # Ensure value fits within f bits
@@ -123,9 +100,6 @@ class Simhash(object):
         return [content[i:i + width] for i in range(max(len(content) - width + 1, 1))]
 
     def _tokenize(self, content):
-<<<<<<< Updated upstream
-        return []
-=======
         """Tokenize the content string into features.
         
         By default, extracts words according to self.reg pattern and creates n-grams.
@@ -145,7 +119,6 @@ class Simhash(object):
             features.extend(self._slide(word))
             
         return features
->>>>>>> Stashed changes
 
     def build_by_text(self, content):
         """Build the simhash from a text string."""
@@ -165,18 +138,10 @@ class Simhash(object):
         This implementation processes features in batches for memory efficiency,
         and optimizes handling for large feature sets and weights.
         """
-<<<<<<< Updated upstream
-        sums = []
-        batch = []
-        count = 0
-        w = 1
-        truncate_mask = 2 ** self.f - 2
-=======
         # Use numpy for efficient computation
         v = np.zeros(self.f, dtype=np.float64)
         
         # Convert dict to items if necessary
->>>>>>> Stashed changes
         if isinstance(features, dict):
             features = list(features.items())
         
@@ -185,25 +150,6 @@ class Simhash(object):
             self.value = 0
             return self
 
-<<<<<<< Updated upstream
-        for f in features:
-            skip_batch = True
-            if not isinstance(f, basestring):
-                f, w = f
-                skip_batch = w > self.large_weight_cutoff or not isinstance(w, int)
-
-            count += w
-            if self.hashfunc_returns_int:
-                h = int_to_bytes(self.hashfunc(f.encode('utf-8')) & truncate_mask, self.f_bytes)
-            else:
-                h = self.hashfunc(f.encode('utf-8'))[-self.f_bytes:]
-
-            if skip_batch:
-                # Cap the weight for bitarray_from_bytes to avoid uint8 overflow
-                if w > 255:
-                    bit_array = self._bitarray_from_bytes(h).astype(float) * w
-                    sums.append(bit_array)
-=======
         # Process features in batches for memory efficiency
         feature_count = 0
         batch = []
@@ -235,7 +181,6 @@ class Simhash(object):
                 # Use specific number of bytes
                 if len(hash_bytes) >= self.f_bytes:
                     hash_bytes = hash_bytes[:self.f_bytes]
->>>>>>> Stashed changes
                 else:
                     # Pad if too short
                     hash_bytes = hash_bytes.ljust(self.f_bytes, b'\x00')
@@ -247,15 +192,11 @@ class Simhash(object):
                 # For large or non-integer weights, we update v directly
                 v += np.array(hash_bits) * weight
             else:
-<<<<<<< Updated upstream
-                batch.append(h * w)
-=======
                 # For normal weights, we batch process
                 batch.append(hash_bits)
                 weights.append(weight)
                 
                 # Process batch if it's full
->>>>>>> Stashed changes
                 if len(batch) >= self.batch_size:
                     self._process_batch(v, batch, weights)
                     batch = []
@@ -263,24 +204,6 @@ class Simhash(object):
         
         # Process any remaining batch items
         if batch:
-<<<<<<< Updated upstream
-            sums.append(self._sum_hashes(batch))
-
-        combined_sums = np.sum(sums, 0)
-        self.value = bytes_to_int(np.packbits(combined_sums > count / 2).tobytes())
-
-    def _sum_hashes(self, digests):
-        bitarray = self._bitarray_from_bytes(b''.join(digests))
-        rows = np.reshape(bitarray, (-1, self.f))
-        return np.sum(rows, 0)
-
-    @staticmethod
-    def _bitarray_from_bytes(b):
-        return np.unpackbits(np.frombuffer(b, dtype='>B'))
-
-    def distance(self, another):
-        assert self.f == another.f
-=======
             self._process_batch(v, batch, weights)
         
         # Determine threshold and convert to binary
@@ -322,16 +245,11 @@ class Simhash(object):
         """Calculate the Hamming distance between two simhashes."""
         assert self.f == another.f
         # XOR the values and count the number of set bits
->>>>>>> Stashed changes
         x = (self.value ^ another.value) & ((1 << self.f) - 1)
         ans = 0
         while x:
             ans += 1
-<<<<<<< Updated upstream
-            x &= x - 1
-=======
             x &= x - 1  # Brian Kernighan's algorithm to count set bits
->>>>>>> Stashed changes
         return ans
 
 
