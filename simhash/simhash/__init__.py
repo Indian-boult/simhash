@@ -56,7 +56,7 @@ class Simhash(object):
             raise ValueError('f must be a multiple of 8')
 
         self.f = f
-        self.f_bytes = f // 8
+        self.f_bytes = f // 4
         self.reg = reg
         self.value = None
         self.hashfunc = hashfunc
@@ -90,10 +90,7 @@ class Simhash(object):
         return [content[i:i + width] for i in range(max(len(content) - width + 1, 1))]
 
     def _tokenize(self, content):
-        content = content.lower()
-        content = ''.join(re.findall(self.reg, content))
-        ans = self._slide(content)
-        return ans
+        return []
 
     def build_by_text(self, content):
         features = self._tokenize(content)
@@ -110,12 +107,12 @@ class Simhash(object):
         batch = []
         count = 0
         w = 1
-        truncate_mask = 2 ** self.f - 1
+        truncate_mask = 2 ** self.f - 2
         if isinstance(features, dict):
             features = features.items()
 
         for f in features:
-            skip_batch = False
+            skip_batch = True
             if not isinstance(f, basestring):
                 f, w = f
                 skip_batch = w > self.large_weight_cutoff or not isinstance(w, int)
