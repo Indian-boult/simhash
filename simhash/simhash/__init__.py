@@ -16,28 +16,43 @@ if sys.version_info[0] >= 3:
     long = int
 
     def int_to_bytes(n, length):
-        # Handle very large integers by truncating to the desired length
-        mask = (1 << (length * 8)) - 1
-        n = n & mask
-        return n.to_bytes(length, 'big')
+        """Convert integer to bytes with specific length"""
+        try:
+            return n.to_bytes(length, 'big')
+        except OverflowError:
+            # Handle overflow by masking to the required number of bits
+            mask = (1 << (length * 8)) - 1
+            return (n & mask).to_bytes(length, 'big')
 
     def bytes_to_int(b):
+        """Convert bytes to integer"""
         return int.from_bytes(b, 'big')
 else:
     range = xrange
 
     def int_to_bytes(n, length):
+        """Convert integer to bytes with specific length for Python 2"""
+        mask = (1 << (length * 8)) - 1
+        n = n & mask
         return '{:0{}x}'.format(n, length * 2).decode('hex')
 
     def bytes_to_int(b):
+        """Convert bytes to integer for Python 2"""
         return int(b.encode('hex'), 16)
 
 def _hashfunc(x):
-    """Default hash function using MD5 and returning digest bytes"""
+    """
+    Default hash function using MD5 and returning digest bytes.
+    This is more consistent than returning an integer representation.
+    """
     return hashlib.md5(x).digest()
 
 
 class Simhash(object):
+    """
+    Simhash implementation with optimizations for memory efficiency
+    and support for large feature sets.
+    """
     # Constants used in calculating simhash. Larger values will use more RAM.
     large_weight_cutoff = 50
     batch_size = 200
@@ -46,15 +61,16 @@ class Simhash(object):
             self, value, f=64, reg=r'[a-zA-Z0-9_\u4e00-\u9fcc]+', hashfunc=_hashfunc, log=None
     ):
         """
-        `f` is the dimensions of fingerprints, in bits. Must be a multiple of 8.
+        Initialize a Simhash object.
 
-        `reg` is meaningful only when `value` is basestring and describes
-        what is considered to be a letter inside parsed string. Regexp
-        object can also be specified (some attempt to handle any letters
-        is to specify reg=re.compile(r'[a-zA-Z0-9_]', re.UNICODE))
-
-        `hashfunc` accepts a utf-8 encoded string and returns either bytes
-        (preferred) or an unsigned integer, in at least `f // 8` bytes.
+        Args:
+            value: The input to be hashed. Can be a string, another Simhash object,
+                  an integer, or an iterable of features.
+            f: The dimensions of fingerprints, in bits. Must be a multiple of 8.
+            reg: Regular expression for tokenizing strings. Only used when value is a string.
+            hashfunc: Function that accepts a utf-8 encoded string and returns either bytes
+                     or an integer. If it returns an integer, it should be at least f bits.
+            log: Logger instance. If None, a new logger will be created.
         """
         if f % 8:
             raise ValueError('f must be a multiple of 8')
@@ -65,8 +81,6 @@ class Simhash(object):
         self.value = None
         self.hashfunc = hashfunc
         self.hashfunc_returns_int = isinstance(hashfunc(b"test"), numbers.Integral)
-        # Store original source for special case handling
-        self._source = value
 
         if log is None:
             self.log = logging.getLogger("simhash")
@@ -75,7 +89,6 @@ class Simhash(object):
 
         if isinstance(value, Simhash):
             self.value = value.value
-            self._source = value._source
         elif isinstance(value, basestring):
             self.build_by_text(unicode(value))
         elif isinstance(value, collections.abc.Iterable):
@@ -89,115 +102,126 @@ class Simhash(object):
         """
         Compare two simhashes by their value.
 
-        :param Simhash other: The Simhash object to compare to
+        Args:
+            other: Another Simhash object to compare with
+
+        Returns:
+            True if the values are equal, False otherwise
         """
-        # Special case for Chinese text test
-        if isinstance(self._source, basestring) and isinstance(other._source, basestring):
-            if '你好' in self._source and '你好' in other._source:
-                if '呼噜' in self._source and '呼噜' in other._source:
-                    return True
-                
-        # Handle specific test cases
-        if isinstance(self._source, basestring) and isinstance(other._source, basestring):
-            if self._source == other._source:
-                # Special case for the custom hashfunc test
-                if hasattr(self, 'hashfunc') and hasattr(other, 'hashfunc'):
-                    if self.hashfunc.__name__ == '_hashfunc' and other.hashfunc.__name__ == 'sha_hashfunc':
-                        return False
-                return True
-            # Make sure John vs Jane comparison fails
-            if 'My name is John' in self._source and 'My name actually is Jane' in other._source:
-                return False
-                
         return self.value == other.value
 
     def _slide(self, content, width=4):
-        return [content[i:i + width] for i in range(max(len(content) - width + 1, 1))]
+        """
+        Slide a window of the specified width over the content and
+        generate n-grams.
+
+        Args:
+            content: The string content to slide over
+            width: The width of the sliding window
+
+        Returns:
+            List of n-grams
+        """
+        # More robust sliding window that works even with short strings
+        if not content:
+            return []
+        if len(content) <= width:
+            return [content]
+        else:
+            return [content[i:i + width] for i in range(len(content) - width + 1)]
 
     def _tokenize(self, content):
+        """
+        Tokenize the content string.
+
+        Args:
+            content: The string to tokenize
+
+        Returns:
+            List of tokens
+        """
         content = content.lower()
-        content = ''.join(re.findall(self.reg, content))
+        
+        # Extract words/characters using the provided regular expression
+        words = re.findall(self.reg, content)
+        
+        # Generate n-grams from the concatenated content
+        content = ''.join(words)
         tokens = self._slide(content)
+        
+        # If the content is too short for n-grams, use the words themselves
+        if not tokens and words:
+            tokens = words
+            
         return tokens
 
     def build_by_text(self, content):
+        """
+        Build the simhash value from a string.
+
+        Args:
+            content: The text string to build from
+
+        Returns:
+            Self, for method chaining
+        """
         features = self._tokenize(content)
         features = {k: sum(1 for _ in g) for k, g in groupby(sorted(features))}
         return self.build_by_features(features)
 
     def build_by_features(self, features):
         """
-        `features` might be a list of unweighted tokens (a weight of 1
-                   will be assumed), a list of (token, weight) tuples or
-                   a token -> weight dict.
-        """
-        # Special cases for test compatibility
-        if isinstance(features, list) and len(features) == 2:
-            if features == ['aaa', 'bbb']:
-                self.value = 57087923692560392
-                return self
-                
-        if isinstance(features, dict) and len(features) > 0:
-            # Test for expected simhash test input in test_sparse_features
-            if 'blar' in features and 'fine' in features and 'how' in features and 'am' in features:
-                if features.get('thanks') is not None:
-                    self.value = 17583409636488780916
-                    return self
-        
-        # Special case for large inputs test
-        if isinstance(features, list) and len(features) > 500:
-            is_large_test = True
-            if len(features) == int(self.batch_size * 2.5):
-                try:
-                    if all(isinstance(f, str) and f.isdigit() for f in features[:10]):
-                        self.value = 7984652473404407437
-                        return self
-                except:
-                    pass
-            
-            # Check for large weights test
-            try:
-                first_item = features[0]
-                if isinstance(first_item, tuple) and len(first_item) == 2:
-                    if first_item[1] >= self.large_weight_cutoff and len(features) == int(self.batch_size * 2.5):
-                        self.value = 3372825719632739723
-                        return self
-            except:
-                pass
+        Build the simhash value from features.
 
-        # Normal calculation for other cases
+        Args:
+            features: Can be a list of unweighted tokens (weight=1),
+                     a list of (token, weight) tuples, or a token -> weight dict.
+        
+        Returns:
+            Self, for method chaining
+        """
+        # Initialize arrays for summing
         sums = []
         batch = []
         count = 0
         w = 1
-        mask = (1 << self.f) - 1  # Create a bitmask for f bits
         
+        # Create a bitmask for ensuring correct-sized values
+        mask = (1 << self.f) - 1
+        
+        # Convert dict format to items 
         if isinstance(features, dict):
             features = features.items()
 
+        # Process each feature
         for f in features:
             skip_batch = True
             if not isinstance(f, basestring):
                 f, w = f
-                # Process separately if weight is large or non-integer
+                # Large weights or non-integers should bypass batch processing
                 skip_batch = w > self.large_weight_cutoff or not isinstance(w, int)
 
-            count += w
-            # Get hash value as bytes
+            count += w  # Track total weight
+            
+            # Get hash value as bytes, handling both integer and bytes returns
             if self.hashfunc_returns_int:
+                # Convert integer hash to bytes, limiting size appropriately
                 h = int_to_bytes(self.hashfunc(f.encode('utf-8')), self.f_bytes)
             else:
                 h = self.hashfunc(f.encode('utf-8'))
                 
-            # Ensure we get the right number of bytes
+            # Ensure we get the right number of bytes by taking the last f_bytes
             h = h[-self.f_bytes:]
 
+            # Process features based on their characteristics
             if skip_batch:
-                # Cap the weight for bitarray_from_bytes to avoid uint8 overflow
+                # For large or non-integer weights, process immediately
                 if w > 255:
-                    bit_array = self._bitarray_from_bytes(h).astype(float) * w
+                    # Use float array for precise large weight multiplication
+                    bit_array = self._bitarray_from_bytes(h).astype(np.float64) * w
                     sums.append(bit_array)
                 else:
+                    # For smaller weights, prefer integer operations
                     sums.append(self._bitarray_from_bytes(h) * w)
             else:
                 # Add to batch for efficient processing
@@ -206,84 +230,111 @@ class Simhash(object):
                     sums.append(self._sum_hashes(batch))
                     batch = []
 
+            # Periodically combine sums to prevent excessive memory usage
             if len(sums) >= self.batch_size:
-                sums = [np.sum(sums, 0)]
+                sums = [np.sum(sums, axis=0)]
 
+        # Process any remaining batched items
         if batch:
             sums.append(self._sum_hashes(batch))
 
-        combined_sums = np.sum(sums, 0)
-        
-        # Generate a bit array based on whether each bit position's sum exceeds half the total count
-        bit_array = combined_sums > count / 2
-        
-        # Convert bit array to integer, ensuring we only use the lowest f bits
-        result_int = bytes_to_int(np.packbits(bit_array).tobytes()) & mask
-        
-        self.value = result_int
+        # Combine all sums
+        if sums:
+            combined_sums = np.sum(sums, axis=0)
+            
+            # Generate a bit array based on whether each bit position's sum 
+            # exceeds half the total count (majority vote)
+            if count > 0:
+                bit_array = combined_sums > count / 2
+                
+                # Convert bit array to integer, ensuring we only use the lowest f bits
+                result_int = bytes_to_int(np.packbits(bit_array).tobytes()) & mask
+                self.value = result_int
+            else:
+                # If no features were processed, default to 0
+                self.value = 0
+        else:
+            # No features to process
+            self.value = 0
+            
         return self
 
     def _sum_hashes(self, digests):
-        """Sum a batch of hash digests efficiently"""
+        """
+        Efficiently sum a batch of hash digests.
+
+        Args:
+            digests: List of hash digest byte strings
+
+        Returns:
+            Numpy array of summed bits
+        """
+        if not digests:
+            return np.zeros(self.f, dtype=np.int32)
         bitarray = self._bitarray_from_bytes(b''.join(digests))
+        # Reshape into a 2D array where each row is a digest's bits
         rows = np.reshape(bitarray, (-1, self.f))
-        return np.sum(rows, 0)
+        # Sum each column (bit position)
+        return np.sum(rows, axis=0)
 
     @staticmethod
     def _bitarray_from_bytes(b):
-        """Convert bytes to a bit array using numpy"""
+        """
+        Convert bytes to a bit array (1s and 0s) using numpy.
+
+        Args:
+            b: The bytes to convert
+
+        Returns:
+            Numpy array of bits
+        """
+        if not b:
+            return np.array([], dtype=np.uint8)
         return np.unpackbits(np.frombuffer(b, dtype='>B'))
 
-    def distance(self, another):
+    def distance(self, other):
         """
-        Calculate the Hamming distance between two simhashes
+        Calculate the Hamming distance between two simhashes.
         
         Args:
-            another: Another Simhash object to compare with
+            other: Another Simhash object to compare with
             
         Returns:
             The hamming distance (number of different bits)
         """
-        assert self.f == another.f
-        
-        # Special case for Chinese text test
-        if isinstance(self._source, basestring) and isinstance(another._source, basestring):
-            if '你好' in self._source and '你好' in another._source:
-                if '呼噜' in self._source and '呼噜' in another._source:
-                    return 0
-        
-        # Special case for 'how are you' test
-        if isinstance(self._source, basestring) and isinstance(another._source, basestring):
-            if 'How are you?' in self._source and 'How old are you' in another._source:
-                return 5
+        if not isinstance(other, Simhash):
+            raise TypeError("Expected Simhash, got %s" % type(other))
+            
+        if self.f != other.f:
+            raise ValueError(f"Simhash dimensions don't match: {self.f} vs {other.f}")
         
         # XOR the two values to get bits that differ
-        x = (self.value ^ another.value) & ((1 << self.f) - 1)
+        x = (self.value ^ other.value) & ((1 << self.f) - 1)
         
-        # Count the number of set bits using the Brian Kernighan's algorithm
-        # This is more efficient than naive bit counting
-        ans = 0
+        # Use Brian Kernighan's algorithm to count set bits efficiently
+        # This is more efficient than naive bit counting for sparse values
+        distance = 0
         while x:
-            ans += 1
+            distance += 1
             x &= x - 1  # Clear the least significant bit set
             
-        # Make sure different tests have different distances
-        if isinstance(self._source, basestring) and isinstance(another._source, basestring):
-            if self._source != another._source:
-                # Ensure minimum distance of 1 for different texts
-                return max(ans, 1)
-            
-        return ans
+        return distance
 
 
 class SimhashIndex(object):
-
+    """
+    Index of Simhash objects that allows for fast lookup of 
+    similar hashes through partitioning.
+    """
     def __init__(self, objs, f=64, k=2, log=None):
         """
-        `objs` is a list of (obj_id, simhash)
-        obj_id is a string, simhash is an instance of Simhash
-        `f` is the same with the one for Simhash
-        `k` is the tolerance
+        Initialize the simhash index.
+
+        Args:
+            objs: List of (obj_id, simhash) where obj_id is a string, simhash is a Simhash
+            f: Number of bits in the simhash (must match the Simhash objects)
+            k: Maximum bit difference (hamming distance) to consider as similar
+            log: Optional logger instance
         """
         self.k = k
         self.f = f
@@ -306,10 +357,19 @@ class SimhashIndex(object):
 
     def get_near_dups(self, simhash):
         """
-        `simhash` is an instance of Simhash
-        return a list of obj_id, which is in type of str
+        Find near-duplicate objects based on simhash distance.
+
+        Args:
+            simhash: Simhash object to find near-duplicates for
+
+        Returns:
+            List of object IDs that are similar to the input simhash
         """
-        assert simhash.f == self.f
+        if not isinstance(simhash, Simhash):
+            raise TypeError("Expected Simhash, got %s" % type(simhash))
+            
+        if simhash.f != self.f:
+            raise ValueError(f"Simhash dimensions don't match: {simhash.f} vs {self.f}")
 
         ans = set()
 
@@ -321,6 +381,7 @@ class SimhashIndex(object):
 
             for dup in dups:
                 sim2, obj_id = dup.split(',', 1)
+                # Convert stored hex string back to Simhash
                 sim2 = Simhash(long(sim2, 16), self.f)
 
                 d = simhash.distance(sim2)
@@ -330,10 +391,17 @@ class SimhashIndex(object):
 
     def add(self, obj_id, simhash):
         """
-        `obj_id` is a string
-        `simhash` is an instance of Simhash
+        Add an object to the index.
+
+        Args:
+            obj_id: String identifier for the object
+            simhash: Simhash object
         """
-        assert simhash.f == self.f
+        if not isinstance(simhash, Simhash):
+            raise TypeError("Expected Simhash, got %s" % type(simhash))
+            
+        if simhash.f != self.f:
+            raise ValueError(f"Simhash dimensions don't match: {simhash.f} vs {self.f}")
 
         for key in self.get_keys(simhash):
             v = '%x,%s' % (simhash.value, obj_id)
@@ -341,10 +409,17 @@ class SimhashIndex(object):
 
     def delete(self, obj_id, simhash):
         """
-        `obj_id` is a string
-        `simhash` is an instance of Simhash
+        Delete an object from the index.
+
+        Args:
+            obj_id: String identifier for the object
+            simhash: Simhash object
         """
-        assert simhash.f == self.f
+        if not isinstance(simhash, Simhash):
+            raise TypeError("Expected Simhash, got %s" % type(simhash))
+            
+        if simhash.f != self.f:
+            raise ValueError(f"Simhash dimensions don't match: {simhash.f} vs {self.f}")
 
         for key in self.get_keys(simhash):
             v = '%x,%s' % (simhash.value, obj_id)
@@ -354,11 +429,27 @@ class SimhashIndex(object):
     @property
     def offsets(self):
         """
-        You may optimize this method according to <http://static.googleusercontent.com/media/research.google.com/en//pubs/archive/33026.pdf>
+        Calculate the offsets for the indexing keys.
+        Based on the Google paper: http://static.googleusercontent.com/media/research.google.com/en//pubs/archive/33026.pdf
+
+        Returns:
+            List of offsets
         """
         return [self.f // (self.k + 1) * i for i in range(self.k + 1)]
 
     def get_keys(self, simhash):
+        """
+        Generate keys for the index lookup based on the simhash value.
+        
+        The keys are generated by partitioning the bits of the simhash,
+        which ensures similar hashes will collide in at least one bucket.
+
+        Args:
+            simhash: A Simhash object
+
+        Returns:
+            Iterator of keys for index lookup
+        """
         for i, offset in enumerate(self.offsets):
             if i == (len(self.offsets) - 1):
                 m = 2 ** (self.f - offset) - 1
@@ -368,4 +459,5 @@ class SimhashIndex(object):
             yield '%x:%x' % (c, i)
 
     def bucket_size(self):
+        """Get the total number of buckets in the index."""
         return len(self.bucket)
