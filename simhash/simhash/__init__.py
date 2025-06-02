@@ -27,6 +27,9 @@ else:
     range = xrange
 
     def int_to_bytes(n, length):
+        # Handle very large integers by truncating to the desired length
+        mask = (1 << (length * 8)) - 1
+        n = n & mask
         return '{:0{}x}'.format(n, length * 2).decode('hex')
 
     def bytes_to_int(b):
@@ -65,8 +68,6 @@ class Simhash(object):
         self.value = None
         self.hashfunc = hashfunc
         self.hashfunc_returns_int = isinstance(hashfunc(b"test"), numbers.Integral)
-        # Store original source for special case handling
-        self._source = value
 
         if log is None:
             self.log = logging.getLogger("simhash")
@@ -75,7 +76,6 @@ class Simhash(object):
 
         if isinstance(value, Simhash):
             self.value = value.value
-            self._source = value._source
         elif isinstance(value, basestring):
             self.build_by_text(unicode(value))
         elif isinstance(value, collections.abc.Iterable):
@@ -91,33 +91,42 @@ class Simhash(object):
 
         :param Simhash other: The Simhash object to compare to
         """
-        # Special case for Chinese text test
-        if isinstance(self._source, basestring) and isinstance(other._source, basestring):
-            if '你好' in self._source and '你好' in other._source:
-                if '呼噜' in self._source and '呼噜' in other._source:
-                    return True
-                
-        # Handle specific test cases
-        if isinstance(self._source, basestring) and isinstance(other._source, basestring):
-            if self._source == other._source:
-                # Special case for the custom hashfunc test
-                if hasattr(self, 'hashfunc') and hasattr(other, 'hashfunc'):
-                    if self.hashfunc.__name__ == '_hashfunc' and other.hashfunc.__name__ == 'sha_hashfunc':
-                        return False
-                return True
-            # Make sure John vs Jane comparison fails
-            if 'My name is John' in self._source and 'My name actually is Jane' in other._source:
-                return False
-                
         return self.value == other.value
 
     def _slide(self, content, width=4):
-        return [content[i:i + width] for i in range(max(len(content) - width + 1, 1))]
+        """
+        Slide a window of the specified width through the content to create tokens.
+        Ensures proper handling of short strings and edge cases.
+        """
+        if not content or len(content) <= width:
+            return [content] if content else []
+        else:
+            return [content[i:i + width] for i in range(len(content) - width + 1)]
 
     def _tokenize(self, content):
+        """
+        Tokenize a string into features suitable for simhash generation.
+        Enhances robustness by preserving word boundaries and handling special cases.
+        """
         content = content.lower()
-        content = ''.join(re.findall(self.reg, content))
-        tokens = self._slide(content)
+        words = re.findall(self.reg, content)
+        
+        # Handle short strings: return the full string as a token
+        if len(content) < 10 and len(words) <= 1:
+            return [content]
+        
+        # Create character n-grams from content
+        tokens = self._slide(''.join(words))
+        
+        # For languages like Chinese, also use the words themselves as tokens
+        if any('\u4e00' <= c <= '\u9fff' for c in content):
+            tokens.extend(words)
+            
+        # Add word-level features for more discriminative power
+        if len(words) > 1:
+            word_pairs = self._slide(' '.join(words), 2)
+            tokens.extend(word_pairs)
+            
         return tokens
 
     def build_by_text(self, content):
@@ -128,115 +137,94 @@ class Simhash(object):
     def build_by_features(self, features):
         """
         `features` might be a list of unweighted tokens (a weight of 1
-                   will be assumed), a list of (token, weight) tuples or
-                   a token -> weight dict.
+                  will be assumed), a list of (token, weight) tuples or
+                  a token -> weight dict.
         """
-        # Special cases for test compatibility
-        if isinstance(features, list) and len(features) == 2:
-            if features == ['aaa', 'bbb']:
-                self.value = 57087923692560392
-                return self
-                
-        if isinstance(features, dict) and len(features) > 0:
-            # Test for expected simhash test input in test_sparse_features
-            if 'blar' in features and 'fine' in features and 'how' in features and 'am' in features:
-                if features.get('thanks') is not None:
-                    self.value = 17583409636488780916
-                    return self
+        # Prepare a bitmask for proper bit length truncation
+        mask = (1 << self.f) - 1
         
-        # Special case for large inputs test
-        if isinstance(features, list) and len(features) > 500:
-            is_large_test = True
-            if len(features) == int(self.batch_size * 2.5):
-                try:
-                    if all(isinstance(f, str) and f.isdigit() for f in features[:10]):
-                        self.value = 7984652473404407437
-                        return self
-                except:
-                    pass
-            
-            # Check for large weights test
-            try:
-                first_item = features[0]
-                if isinstance(first_item, tuple) and len(first_item) == 2:
-                    if first_item[1] >= self.large_weight_cutoff and len(features) == int(self.batch_size * 2.5):
-                        self.value = 3372825719632739723
-                        return self
-            except:
-                pass
-
-        # Normal calculation for other cases
-        sums = []
-        batch = []
-        count = 0
-        w = 1
-        mask = (1 << self.f) - 1  # Create a bitmask for f bits
+        v = [0] * self.f  # Initialize v to f zeros (one for each bit position)
         
+        # Convert dict to items if needed
         if isinstance(features, dict):
             features = features.items()
 
-        for f in features:
-            skip_batch = True
-            if not isinstance(f, basestring):
-                f, w = f
-                # Process separately if weight is large or non-integer
-                skip_batch = w > self.large_weight_cutoff or not isinstance(w, int)
-
-            count += w
-            # Get hash value as bytes
-            if self.hashfunc_returns_int:
-                h = int_to_bytes(self.hashfunc(f.encode('utf-8')), self.f_bytes)
+        # Process features in batches for better memory efficiency
+        feature_batches = []
+        current_batch = []
+        
+        for feature in features:
+            # Extract feature and weight
+            if isinstance(feature, basestring):
+                f, w = feature, 1
             else:
-                h = self.hashfunc(f.encode('utf-8'))
+                f, w = feature
                 
-            # Ensure we get the right number of bytes
-            h = h[-self.f_bytes:]
-
-            if skip_batch:
-                # Cap the weight for bitarray_from_bytes to avoid uint8 overflow
-                if w > 255:
-                    bit_array = self._bitarray_from_bytes(h).astype(float) * w
-                    sums.append(bit_array)
-                else:
-                    sums.append(self._bitarray_from_bytes(h) * w)
+            # Skip empty features
+            if not f:
+                continue
+                
+            # Get the hash for this feature
+            if self.hashfunc_returns_int:
+                hash_int = self.hashfunc(f.encode('utf-8'))
+                # Ensure we only use the lowest bits needed
+                hash_int &= mask
             else:
-                # Add to batch for efficient processing
-                batch.extend([h] * w)  # Multiply by weight
-                if len(batch) >= self.batch_size:
-                    sums.append(self._sum_hashes(batch))
-                    batch = []
-
-            if len(sums) >= self.batch_size:
-                sums = [np.sum(sums, 0)]
-
-        if batch:
-            sums.append(self._sum_hashes(batch))
-
-        combined_sums = np.sum(sums, 0)
+                # Get bytes and convert to integer
+                hash_bytes = self.hashfunc(f.encode('utf-8'))
+                # Use the last self.f_bytes of the hash
+                hash_bytes = hash_bytes[-self.f_bytes:]
+                hash_int = bytes_to_int(hash_bytes) & mask
+                
+            # If the weight is very large or non-integer, handle directly
+            if w > self.large_weight_cutoff or isinstance(w, float):
+                # For large weights, we'll process directly rather than batching
+                for i in range(self.f):
+                    bitmask = 1 << i
+                    if hash_int & bitmask:
+                        v[i] += w
+                    else:
+                        v[i] -= w
+            else:
+                # For reasonable integer weights, add to batch
+                if w == 1:
+                    current_batch.append(hash_int)
+                else:
+                    # Convert to int to handle numpy types
+                    w_int = int(w)
+                    current_batch.extend([hash_int] * w_int)
+                    
+            # Process batch if it gets too large
+            if len(current_batch) >= self.batch_size:
+                feature_batches.append(current_batch)
+                current_batch = []
         
-        # Generate a bit array based on whether each bit position's sum exceeds half the total count
-        bit_array = combined_sums > count / 2
+        # Don't forget the last batch
+        if current_batch:
+            feature_batches.append(current_batch)
         
-        # Convert bit array to integer, ensuring we only use the lowest f bits
-        result_int = bytes_to_int(np.packbits(bit_array).tobytes()) & mask
+        # Process all batches
+        for batch in feature_batches:
+            for hash_int in batch:
+                for i in range(self.f):
+                    bitmask = 1 << i
+                    if hash_int & bitmask:
+                        v[i] += 1
+                    else:
+                        v[i] -= 1
         
-        self.value = result_int
+        # Finalize the simhash value
+        simhash = 0
+        for i in range(self.f):
+            if v[i] > 0:
+                simhash |= 1 << i
+                
+        self.value = simhash
         return self
-
-    def _sum_hashes(self, digests):
-        """Sum a batch of hash digests efficiently"""
-        bitarray = self._bitarray_from_bytes(b''.join(digests))
-        rows = np.reshape(bitarray, (-1, self.f))
-        return np.sum(rows, 0)
-
-    @staticmethod
-    def _bitarray_from_bytes(b):
-        """Convert bytes to a bit array using numpy"""
-        return np.unpackbits(np.frombuffer(b, dtype='>B'))
 
     def distance(self, another):
         """
-        Calculate the Hamming distance between two simhashes
+        Calculate the Hamming distance between two simhashes.
         
         Args:
             another: Another Simhash object to compare with
@@ -246,32 +234,15 @@ class Simhash(object):
         """
         assert self.f == another.f
         
-        # Special case for Chinese text test
-        if isinstance(self._source, basestring) and isinstance(another._source, basestring):
-            if '你好' in self._source and '你好' in another._source:
-                if '呼噜' in self._source and '呼噜' in another._source:
-                    return 0
-        
-        # Special case for 'how are you' test
-        if isinstance(self._source, basestring) and isinstance(another._source, basestring):
-            if 'How are you?' in self._source and 'How old are you' in another._source:
-                return 5
-        
         # XOR the two values to get bits that differ
         x = (self.value ^ another.value) & ((1 << self.f) - 1)
         
-        # Count the number of set bits using the Brian Kernighan's algorithm
+        # Count the number of set bits using Brian Kernighan's algorithm
         # This is more efficient than naive bit counting
         ans = 0
         while x:
             ans += 1
             x &= x - 1  # Clear the least significant bit set
-            
-        # Make sure different tests have different distances
-        if isinstance(self._source, basestring) and isinstance(another._source, basestring):
-            if self._source != another._source:
-                # Ensure minimum distance of 1 for different texts
-                return max(ans, 1)
             
         return ans
 
